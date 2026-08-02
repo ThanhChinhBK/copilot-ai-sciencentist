@@ -92,6 +92,33 @@ function detectBenchmarkCommand(root) {
   if (existsSync(join(root, 'Makefile'))) {
     return 'make test';
   }
+
+  const ignored = new Set(['.git', 'node_modules', '.ai-scientist', 'report', 'experiments']);
+  const nestedCommands = [];
+
+  function visit(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory() || ignored.has(entry.name)) continue;
+      const path = join(directory, entry.name);
+      const nestedPackagePath = join(path, 'package.json');
+      if (existsSync(nestedPackagePath)) {
+        const packageJson = JSON.parse(readFileSync(nestedPackagePath, 'utf8'));
+        for (const name of ['test', 'benchmark']) {
+          if (packageJson.scripts?.[name]) {
+            const prefix = relative(root, path).replaceAll(sep, '/');
+            nestedCommands.push(`npm --prefix '${prefix.replaceAll("'", "'\\''")}' ${name === 'test' ? 'test' : `run ${name}`}`);
+            break;
+          }
+        }
+      }
+      visit(path);
+    }
+  }
+
+  visit(root);
+  if (nestedCommands.length === 1) {
+    return nestedCommands[0];
+  }
   return null;
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -32,6 +32,32 @@ function createProject() {
   git(root, 'commit', '-qm', 'Initial fixture');
   return root;
 }
+
+test('detects a benchmark in a single nested package', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bfts-tools-nested-'));
+  const packageDirectory = join(root, 'tools', 'runner');
+  git(root, 'init', '-q');
+  git(root, 'config', 'user.email', 'test@example.com');
+  git(root, 'config', 'user.name', 'Test User');
+  mkdirSync(packageDirectory, { recursive: true });
+  writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({
+    scripts: { test: 'node -e "process.exit(0)"' },
+  }));
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'Initial fixture');
+
+  const plan = await planRun({
+    projectPath: root,
+    issue: 'Investigate the nested package',
+    numWorkers: 1,
+    maxSteps: 1,
+    maxDebugAttempts: 1,
+    numDrafts: 1,
+  });
+
+  assert.equal(plan.readiness.ready, true);
+  assert.equal(plan.benchmarkCommand, "npm --prefix 'tools/runner' test");
+});
 
 test('plans, searches, benchmarks, and reports an issue-driven run', async () => {
   const root = createProject();
