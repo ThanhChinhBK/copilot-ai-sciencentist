@@ -1,11 +1,12 @@
 {
   "name": "bfts-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local MCP server exposing best-first tree-search (BFTS) tools for the AI Scientist Copilot agent.",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "license": "MIT",
   "dependencies": {

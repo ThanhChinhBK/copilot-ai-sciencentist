@@ -12,13 +12,37 @@ This is a scoped re-implementation of the BFTS search idea from
 
 ## How it works
 
-1. **Scan** — identify a scoped problem in the target project.
-2. **Propose** — draft 2-4 candidate solutions (BFTS root nodes).
-3. **Search** — best-first exploration of candidates, each on an isolated git
+1. **Plan** — turn your supplied issue into a research/test/report plan and verify the
+   repository is ready.
+2. **Research** — inspect relevant code, tests, project patterns, and external evidence
+   when useful.
+3. **Propose** — draft 2-4 candidate solutions (BFTS root nodes).
+4. **Search** — best-first exploration of candidates, each on an isolated git
    branch/worktree, bounded by worker/step/debug-attempt limits.
-4. **Benchmark** — run the project's existing test/build/lint command against each
+5. **Benchmark** — run the project's existing test/build/lint command against each
    executed candidate.
-5. **Report** — a short Markdown report comparing tradeoffs and recommending a winner.
+6. **Report** — a short Markdown report comparing tradeoffs and recommending a winner.
+
+## First flow
+
+After cloning the repository and running `npm install` in `mcp-servers/bfts-tools`:
+
+```text
+/agent ai-scientist
+/ai-scientist-plan <describe the current issue>
+```
+
+Review `report/<run-id>/plan.md`. If readiness passes, enable Copilot CLI autopilot for
+the long execution and resume with:
+
+```text
+/autopilot
+/ai-scientist-run <run-id>
+```
+
+Use `/ai-scientist-solve <issue>` to plan and proceed in one session. The long run
+continues through research, bounded BFTS exploration, common benchmarks, and
+`report/<run-id>/report.md`.
 
 ## Structure
 
@@ -27,14 +51,16 @@ This is a scoped re-implementation of the BFTS search idea from
   in `.mcp.json`; Copilot CLI spawns it automatically.
 - `.github/agents/ai-scientist.agent.md` — the Copilot custom agent orchestrating the
   workflow using the MCP tools and `/fleet` for parallel candidate exploration.
-- `.github/prompts/ai-scientist-solve.prompt.md` — single end-to-end workflow command.
+- `.github/prompts/ai-scientist-plan.prompt.md` — planning/readiness-only command.
+- `.github/prompts/ai-scientist-run.prompt.md` — long execution/resume command.
+- `.github/prompts/ai-scientist-solve.prompt.md` — plan and run in one session.
 - `report/`, `experiments/` — generated run artifacts (git-ignored per run).
 
 ## Status
 
-Project scaffold only. MCP tools are currently stubs (see
-`mcp-servers/bfts-tools/README.md`) — search/benchmark/report logic is implemented in
-later passes.
+The first issue-driven flow is implemented: persistent plans/readiness, BFTS state and
+selection, parent/child refinement nodes, isolated worktrees, benchmark capture, and
+final report persistence.
 
 ## Safety
 

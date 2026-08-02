@@ -2,90 +2,164 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import {
+  applyCandidate,
+  getRun,
+  planRun,
+  proposeCandidates,
+  recordResult,
+  recheckRun,
+  runBenchmark,
+  scanProject,
+  selectNextNodes,
+  writeReport,
+} from './src/core.js';
 
-const server = new McpServer({ name: 'bfts-tools', version: '0.1.0' });
+const server = new McpServer({ name: 'bfts-tools', version: '0.2.0' });
 
-function notImplemented(toolName) {
-  return async () => ({
-    content: [{ type: 'text', text: `${toolName} is not implemented yet.` }],
-    isError: true,
+function result(value) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    structuredContent: value,
+  };
+}
+
+function register(name, description, inputSchema, handler) {
+  server.registerTool(name, { description, inputSchema }, async (input) => {
+    try {
+      return result(await handler(input));
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: error.message }],
+        isError: true,
+      };
+    }
   });
 }
 
-server.registerTool(
+register(
+  'bftsPlanRun',
+  'Create an issue-driven research and execution plan, verify project readiness, and initialize a persistent run.',
+  {
+    projectPath: z.string(),
+    issue: z.string().min(1),
+    benchmarkCommand: z.string().optional(),
+    numWorkers: z.number().int().min(1).max(4).default(2),
+    maxSteps: z.number().int().min(1).max(20).default(8),
+    maxDebugAttempts: z.number().int().min(0).max(5).default(2),
+    numDrafts: z.number().int().min(2).max(6).default(3),
+  },
+  planRun,
+);
+
+register(
+  'bftsRecheckRun',
+  'Re-run readiness checks after blockers such as a dirty baseline or missing benchmark command are resolved.',
+  {
+    runId: z.string(),
+    projectPath: z.string(),
+    benchmarkCommand: z.string().optional(),
+  },
+  recheckRun,
+);
+
+register(
   'bftsScanProject',
+  'Inspect a project and return repository, test-command, and TODO/FIXME signals for issue research.',
   {
-    description: 'Scan a project to identify a concrete, scoped problem to solve.',
-    inputSchema: {
-      projectPath: z.string(),
-      focus: z.string().optional(),
-    },
+    projectPath: z.string(),
+    focus: z.string().optional(),
   },
-  notImplemented('bftsScanProject'),
+  scanProject,
 );
 
-server.registerTool(
+register(
   'bftsProposeCandidates',
+  'Register candidate solution approaches as BFTS root nodes.',
   {
-    description: 'Register 2-4 candidate solution approaches as BFTS root nodes.',
-    inputSchema: {
-      runId: z.string(),
-      candidates: z.array(z.object({ description: z.string() })),
-    },
+    runId: z.string(),
+    projectPath: z.string(),
+    parentNodeId: z.string().optional(),
+    candidates: z.array(z.object({
+      title: z.string().min(1),
+      description: z.string().min(1),
+      rationale: z.string().optional(),
+      initialScore: z.number().optional(),
+    })).min(2).max(6),
   },
-  notImplemented('bftsProposeCandidates'),
+  proposeCandidates,
 );
 
-server.registerTool(
+register(
   'bftsSelectNextNode',
+  'Select and reserve the highest-scored pending BFTS nodes within the run budget.',
   {
-    description: 'Select the next pending node(s) to explore via best-first search.',
-    inputSchema: {
-      runId: z.string(),
-      numWorkers: z.number().int().positive().default(1),
-    },
+    runId: z.string(),
+    projectPath: z.string(),
+    numWorkers: z.number().int().min(1).max(4).optional(),
   },
-  notImplemented('bftsSelectNextNode'),
+  selectNextNodes,
 );
 
-server.registerTool(
+register(
   'bftsApplyCandidate',
+  'Create an isolated git branch and worktree for a selected candidate node.',
   {
-    description: 'Apply a candidate node on an isolated git branch/worktree.',
-    inputSchema: {
-      runId: z.string(),
-      nodeId: z.string(),
-    },
+    runId: z.string(),
+    projectPath: z.string(),
+    nodeId: z.string(),
   },
-  notImplemented('bftsApplyCandidate'),
+  applyCandidate,
 );
 
-server.registerTool(
+register(
   'bftsRunBenchmark',
+  'Run the configured or supplied benchmark command in a candidate worktree and persist measured output.',
   {
-    description: 'Run the project benchmark/test command against a candidate branch.',
-    inputSchema: {
-      runId: z.string(),
-      nodeId: z.string(),
-      command: z.string().optional(),
-    },
+    runId: z.string(),
+    projectPath: z.string(),
+    nodeId: z.string(),
+    command: z.string().optional(),
+    timeoutSeconds: z.number().int().min(1).max(3600).default(900),
   },
-  notImplemented('bftsRunBenchmark'),
+  runBenchmark,
 );
 
-server.registerTool(
+register(
   'bftsRecordResult',
+  'Record implementation notes and final status for a BFTS node.',
   {
-    description: 'Record a node result (status, score, benchmark output) in the state store.',
-    inputSchema: {
-      runId: z.string(),
-      nodeId: z.string(),
-      status: z.enum(['done', 'abandoned']),
-      score: z.number().optional(),
-      notes: z.string().optional(),
-    },
+    runId: z.string(),
+    projectPath: z.string(),
+    nodeId: z.string(),
+    status: z.enum(['pending', 'done', 'abandoned']),
+    score: z.number().optional(),
+    notes: z.string().optional(),
+    debugAttempted: z.boolean().default(false),
   },
-  notImplemented('bftsRecordResult'),
+  recordResult,
+);
+
+register(
+  'bftsGetRun',
+  'Read the persistent plan, readiness state, search nodes, and benchmark results for a run.',
+  {
+    runId: z.string(),
+    projectPath: z.string(),
+  },
+  getRun,
+);
+
+register(
+  'bftsWriteReport',
+  'Write the final measured tradeoff report for a completed or exhausted run.',
+  {
+    runId: z.string(),
+    projectPath: z.string(),
+    recommendation: z.string().optional(),
+    conclusion: z.string().optional(),
+  },
+  writeReport,
 );
 
 const transport = new StdioServerTransport();
