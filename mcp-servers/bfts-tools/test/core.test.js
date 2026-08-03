@@ -10,8 +10,11 @@ import {
   planRun,
   proposeCandidates,
   recordResult,
+  recheckRun,
+  runBaseline,
   runBenchmark,
   selectNextNodes,
+  setEvaluationCriteria,
   writeReport,
 } from '../src/core.js';
 
@@ -59,6 +62,49 @@ test('detects a benchmark in a single nested package', async () => {
   assert.equal(plan.benchmarkCommand, "npm --prefix 'tools/runner' test");
 });
 
+test('invalidates the baseline when readiness inputs change', async () => {
+  const root = createProject();
+  const plan = await planRun({
+    projectPath: root,
+    issue: 'Investigate a readiness change',
+    numWorkers: 1,
+    maxSteps: 1,
+    maxDebugAttempts: 1,
+    numDrafts: 2,
+  });
+  const initialBaseline = await runBaseline({
+    projectPath: root,
+    runId: plan.runId,
+    timeoutSeconds: 30,
+  });
+
+  const rechecked = await recheckRun({
+    projectPath: root,
+    runId: plan.runId,
+    benchmarkCommand: 'npm run benchmark',
+  });
+
+  assert.equal(rechecked.baselineBenchmark, null);
+  assert.match(rechecked.searchHistory.at(-1).event, /baseline-invalidated/);
+
+  const replacementBaseline = await runBaseline({
+    projectPath: root,
+    runId: plan.runId,
+    timeoutSeconds: 30,
+  });
+  assert.notEqual(
+    replacementBaseline.benchmark.worktreePath,
+    initialBaseline.benchmark.worktreePath,
+  );
+  writeFileSync(join(root, 'change.txt'), 'new baseline\n');
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'Change baseline');
+  const commitRecheck = await recheckRun({ projectPath: root, runId: plan.runId });
+  assert.equal(commitRecheck.baselineBenchmark, null);
+  const rerun = await runBaseline({ projectPath: root, runId: plan.runId, timeoutSeconds: 30 });
+  assert.equal(rerun.benchmark.runs, 1);
+});
+
 test('plans, searches, benchmarks, and reports an issue-driven run', async () => {
   const root = createProject();
   const plan = await planRun({
@@ -73,6 +119,24 @@ test('plans, searches, benchmarks, and reports an issue-driven run', async () =>
   assert.equal(plan.readiness.ready, true);
   assert.equal(plan.benchmarkCommand, 'npm test');
   assert.match(readFileSync(join(root, 'report', plan.runId, 'plan.md'), 'utf8'), /Readiness/);
+  assert.match(readFileSync(join(root, 'report', plan.runId, 'problem.md'), 'utf8'), /startup behavior/);
+
+  const baseline = await runBaseline({
+    projectPath: root,
+    runId: plan.runId,
+    timeoutSeconds: 30,
+    runs: 2,
+  });
+  assert.equal(baseline.benchmark.passedRuns, 2);
+
+  await setEvaluationCriteria({
+    projectPath: root,
+    runId: plan.runId,
+    criteria: [
+      { name: 'Correctness', description: 'Fixes the issue without regressions.', weight: 2 },
+      { name: 'Maintainability', description: 'Keeps the implementation easy to evolve.', weight: 1 },
+    ],
+  });
 
   await proposeCandidates({
     projectPath: root,
@@ -96,8 +160,10 @@ test('plans, searches, benchmarks, and reports an issue-driven run', async () =>
     runId: plan.runId,
     nodeId: selection.nodes[0].nodeId,
     timeoutSeconds: 30,
+    runs: 2,
   });
   assert.equal(benchmark.benchmark.success, true);
+  assert.equal(benchmark.benchmark.passedRuns, 2);
 
   await recordResult({
     projectPath: root,
@@ -106,6 +172,33 @@ test('plans, searches, benchmarks, and reports an issue-driven run', async () =>
     status: 'done',
     notes: 'Simple implementation with passing tests.',
     debugAttempted: false,
+    evaluation: [
+      { name: 'Correctness', score: 9, evidence: 'The common benchmark passed twice.' },
+      { name: 'Maintainability', score: 8, evidence: 'The change is isolated and small.' },
+    ],
+  });
+  const stateFile = join(root, '.ai-scientist', 'runs', plan.runId, 'state.json');
+  const legacyState = JSON.parse(readFileSync(stateFile, 'utf8'));
+  const legacyNode = legacyState.nodes.find((node) => node.nodeId === selection.nodes[0].nodeId);
+  legacyNode.evaluation = null;
+  delete legacyNode.benchmark.runs;
+  delete legacyNode.benchmark.passedRuns;
+  delete legacyNode.benchmark.medianDurationMs;
+  delete legacyNode.benchmark.minDurationMs;
+  delete legacyNode.benchmark.maxDurationMs;
+  delete legacyNode.benchmark.executions;
+  writeFileSync(stateFile, `${JSON.stringify(legacyState, null, 2)}\n`);
+  await recordResult({
+    projectPath: root,
+    runId: plan.runId,
+    nodeId: selection.nodes[0].nodeId,
+    status: 'done',
+    notes: 'Legacy result re-evaluated with the shared rubric.',
+    debugAttempted: false,
+    evaluation: [
+      { name: 'Correctness', score: 9, evidence: 'The migrated benchmark passed.' },
+      { name: 'Maintainability', score: 8, evidence: 'The implementation remains isolated.' },
+    ],
   });
   await recordResult({
     projectPath: root,
@@ -153,5 +246,8 @@ test('plans, searches, benchmarks, and reports an issue-driven run', async () =>
   });
   const report = await writeReport({ projectPath: root, runId: plan.runId });
   assert.match(readFileSync(report.reportPath, 'utf8'), /Lazy initialization/);
+  assert.match(readFileSync(report.reportPath, 'utf8'), /Correctness: 9\.0\/10/);
+  assert.match(readFileSync(report.reportPath, 'utf8'), /The migrated benchmark passed/);
+  assert.match(readFileSync(join(root, 'report', plan.runId, 'search-log.md'), 'utf8'), /baseline-benchmarked/);
   assert.equal((await getRun({ projectPath: root, runId: plan.runId })).status, 'reported');
 });

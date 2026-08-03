@@ -11,9 +11,11 @@ Treat the remaining prompt text as the current issue to investigate.
    success criteria.
 3. Confirm that local research, optional external research, isolated implementation,
    test execution, and report writing are all available.
-4. Update `report/<run-id>/plan.md` with issue-specific research questions and evaluation
-   criteria.
-5. Stop before proposing or implementing candidates.
+4. Call `bftsRunBaseline` against the untouched base commit.
+5. Call `bftsSetEvaluationCriteria` with a shared weighted rubric containing at least
+   correctness and one issue-specific engineering tradeoff.
+6. Update `report/<run-id>/plan.md` with issue-specific research questions.
+7. Stop before proposing or implementing candidates.
 
 Return the run ID, plan path, readiness result, and the exact command to start/resume the
 long run. If readiness is blocked, state only the concrete blockers.

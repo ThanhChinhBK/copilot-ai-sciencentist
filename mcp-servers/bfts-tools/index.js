@@ -9,13 +9,15 @@ import {
   proposeCandidates,
   recordResult,
   recheckRun,
+  runBaseline,
   runBenchmark,
   scanProject,
   selectNextNodes,
+  setEvaluationCriteria,
   writeReport,
 } from './src/core.js';
 
-const server = new McpServer({ name: 'bfts-tools', version: '0.3.0' });
+const server = new McpServer({ name: 'bfts-tools', version: '0.3.1' });
 
 function result(value) {
   return {
@@ -74,6 +76,33 @@ register(
 );
 
 register(
+  'bftsSetEvaluationCriteria',
+  'Define the shared weighted rubric used to compare every candidate in a run.',
+  {
+    runId: z.string(),
+    projectPath: z.string(),
+    criteria: z.array(z.object({
+      name: z.string().min(1),
+      description: z.string().min(1),
+      weight: z.number().positive(),
+    })).min(2).max(8),
+  },
+  setEvaluationCriteria,
+);
+
+register(
+  'bftsRunBaseline',
+  'Run the common benchmark against the untouched base commit in an isolated worktree.',
+  {
+    runId: z.string(),
+    projectPath: z.string(),
+    timeoutSeconds: z.number().int().min(1).max(3600).default(900),
+    runs: z.number().int().min(1).max(5).default(1),
+  },
+  runBaseline,
+);
+
+register(
   'bftsProposeCandidates',
   'Register candidate solution approaches as BFTS root nodes.',
   {
@@ -121,6 +150,7 @@ register(
     nodeId: z.string(),
     command: z.string().optional(),
     timeoutSeconds: z.number().int().min(1).max(3600).default(900),
+    runs: z.number().int().min(1).max(5).default(1),
   },
   runBenchmark,
 );
@@ -136,6 +166,11 @@ register(
     score: z.number().optional(),
     notes: z.string().optional(),
     debugAttempted: z.boolean().default(false),
+    evaluation: z.array(z.object({
+      name: z.string().min(1),
+      score: z.number().min(0).max(10),
+      evidence: z.string().min(1),
+    })).optional(),
   },
   recordResult,
 );

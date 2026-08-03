@@ -25,7 +25,9 @@ in prose.
    - a concrete test/benchmark command;
    - writable report output;
    - enough issue detail to define success.
-4. If a fixable check is blocked, stop before implementation and clearly identify it.
+4. Run `bftsRunBaseline` against the untouched base commit. Use three runs when runtime,
+   flakiness, or nondeterminism is relevant; otherwise use one.
+5. If a fixable check is blocked, stop before implementation and clearly identify it.
    After it is resolved, call `bftsRecheckRun` so the same run can continue.
 
 ## Phase 2: Research
@@ -37,6 +39,11 @@ Research the issue before proposing code:
 - use external research only when it materially improves the candidate set;
 - write verified findings and source URLs to `report/<run-id>/research.md`;
 - turn ambiguous goals into explicit evaluation criteria.
+
+Before proposing candidates, call `bftsSetEvaluationCriteria` with 2-6 shared weighted
+criteria. Use the same rubric for every candidate. Criteria should cover issue correctness
+and the most relevant engineering tradeoffs, such as regression risk, maintainability,
+scope fit, performance, or compatibility.
 
 Do not add padding research. Stop once there is enough evidence to propose meaningfully
 different approaches.
@@ -51,9 +58,11 @@ different approaches.
    - call `bftsApplyCandidate`;
    - send implementation work to that returned worktree path only;
    - run targeted checks while iterating;
-   - call `bftsRunBenchmark` for the common final benchmark;
-   - record measured results and tradeoffs with `bftsRecordResult`; a successful node is
-     committed on its isolated branch so child refinements inherit its implementation.
+   - call `bftsRunBenchmark` for the common final benchmark, using repeated runs when the
+     issue involves performance or flaky behavior;
+   - record measured results and tradeoffs with `bftsRecordResult`, scoring every shared
+     criterion from 0-10 with concrete evidence; a successful node is committed on its
+     isolated branch so child refinements inherit its implementation.
 4. Expand promising nodes by calling `bftsProposeCandidates` with `parentNodeId` when a
    refinement or a combined approach is justified. Children start from the parent branch.
 5. A failed node may return to `pending` for a bounded debug attempt. Abandon it when the
@@ -70,6 +79,8 @@ Call `bftsGetRun`, assess all measured evidence, and call `bftsWriteReport`. The
 - researched constraints and sources;
 - every candidate, including failures and unexecuted ideas;
 - comparable test/benchmark results;
+- the untouched baseline result and repeated-run consistency where applicable;
+- criterion-by-criterion evidence for each completed candidate;
 - advantages, disadvantages, risks, and maintenance cost;
 - a recommendation proportional to the evidence;
 - remaining uncertainty and suggested next validation.

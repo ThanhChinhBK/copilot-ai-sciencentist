@@ -9,11 +9,13 @@ process automatically per `.mcp.json` — no manual server management needed.
 - `bftsPlanRun` — create the issue-driven plan, readiness checks, and persistent run.
 - `bftsRecheckRun` — re-run readiness after a blocker is fixed.
 - `bftsScanProject` — identify a concrete, scoped problem in a target project.
+- `bftsRunBaseline` — benchmark the untouched base commit in an isolated worktree.
+- `bftsSetEvaluationCriteria` — define the shared weighted rubric for all candidates.
 - `bftsProposeCandidates` — register candidate solution approaches as BFTS root nodes.
 - `bftsSelectNextNode` — best-first selection of the next node(s) to explore.
 - `bftsApplyCandidate` — apply a candidate on an isolated git branch/worktree.
-- `bftsRunBenchmark` — run the project's test/build/lint command against a candidate.
-- `bftsRecordResult` — record a node's status/score/benchmark output.
+- `bftsRunBenchmark` — run the common command one or more times against a candidate.
+- `bftsRecordResult` — record criterion scores, evidence, and final node status.
 - `bftsGetRun` — retrieve persistent plan, node, and benchmark state.
 - `bftsWriteReport` — persist the final measured tradeoff report.
 

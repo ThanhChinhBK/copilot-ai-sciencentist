@@ -28,7 +28,7 @@ This is a scoped re-implementation of the BFTS search idea from
 From the root of the Git repository you want to investigate:
 
 ```bash
-npx --yes --package=github:ThanhChinhBK/copilot-ai-sciencentist#v0.3.0 copilot-ai-scientist init
+npx --yes --package=github:ThanhChinhBK/copilot-ai-sciencentist#v0.3.1 copilot-ai-scientist init
 ```
 
 The installer adds the agent and prompt files under `.github/`, installs its isolated MCP
@@ -80,9 +80,10 @@ continues through research, bounded BFTS exploration, common benchmarks, and
 
 ## Status
 
-The first issue-driven flow is implemented: persistent plans/readiness, BFTS state and
-selection, parent/child refinement nodes, isolated worktrees, benchmark capture, and
-final report persistence.
+The issue-driven flow includes persistent plans/readiness, an isolated baseline,
+shared weighted evaluation criteria, BFTS state and selection, parent/child refinement,
+repeated benchmark capture, search-history persistence, and a final evidence-based
+report.
 
 ## Safety
 
