@@ -15,7 +15,7 @@ import {
   writeReport,
 } from './src/core.js';
 
-const server = new McpServer({ name: 'bfts-tools', version: '0.2.0' });
+const server = new McpServer({ name: 'bfts-tools', version: '0.3.0' });
 
 function result(value) {
   return {

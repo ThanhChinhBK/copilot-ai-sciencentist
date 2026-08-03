@@ -1,0 +1,44 @@
+{
+  "name": "copilot-ai-scientist",
+  "version": "0.3.0",
+  "description": "Installable GitHub Copilot CLI agent for issue-driven best-first tree search.",
+  "type": "module",
+  "bin": {
+    "copilot-ai-scientist": "cli.js"
+  },
+  "files": [
+    "cli.js",
+    ".github/agents/ai-scientist.agent.md",
+    ".github/prompts/*.prompt.md",
+    "mcp-servers/bfts-tools/index.js",
+    "mcp-servers/bfts-tools/launcher.js",
+    "mcp-servers/bfts-tools/src/",
+    "mcp-servers/bfts-tools/package.json",
+    "mcp-servers/bfts-tools/package-lock.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "npm --prefix mcp-servers/bfts-tools test",
+    "prepack": "npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThanhChinhBK/copilot-ai-sciencentist.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ThanhChinhBK/copilot-ai-sciencentist/issues"
+  },
+  "homepage": "https://github.com/ThanhChinhBK/copilot-ai-sciencentist#readme",
+  "keywords": [
+    "copilot",
+    "github-copilot",
+    "mcp",
+    "best-first-search",
+    "ai-scientist"
+  ],
+  "license": "MIT"
+}

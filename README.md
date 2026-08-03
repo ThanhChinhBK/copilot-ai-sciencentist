@@ -23,9 +23,31 @@ This is a scoped re-implementation of the BFTS search idea from
    executed candidate.
 6. **Report** — a short Markdown report comparing tradeoffs and recommending a winner.
 
+## Install
+
+From the root of the Git repository you want to investigate:
+
+```bash
+npx --yes --package=github:ThanhChinhBK/copilot-ai-sciencentist#v0.3.0 copilot-ai-scientist init
+```
+
+The installer adds the agent and prompt files under `.github/`, installs its isolated MCP
+runtime, and merges `bfts-tools` into `.mcp.json` without replacing other MCP servers.
+Commit the installed files so everyone working in the repository gets the same setup.
+On a fresh clone, the MCP launcher restores its dependencies automatically on first use.
+
+When the package is available from npm, the equivalent command is:
+
+```bash
+npx copilot-ai-scientist init
+```
+
+The installer refuses to overwrite customized AI Scientist files. Pass `--force` only
+when intentionally upgrading or replacing them.
+
 ## First flow
 
-After cloning the repository and running `npm install` in `mcp-servers/bfts-tools`:
+Start Copilot CLI in the installed repository:
 
 ```text
 /agent ai-scientist
