@@ -50,21 +50,25 @@ different approaches.
 
 ## Phase 3: BFTS long run
 
-1. Propose 2-4 root approaches through `bftsProposeCandidates`. Give each a clear title,
-   implementation description, rationale, and evidence-based initial score.
+1. Propose exactly the configured `numDrafts` root approaches through
+   `bftsProposeCandidates`. Give each a clear title, implementation description, and
+   rationale. Drafts are not scored before execution.
 2. Repeatedly call `bftsSelectNextNode`. Use parallel subagents/fleet execution when
-   multiple nodes are selected and their worktrees are independent.
+   multiple nodes are selected and their worktrees are independent. When it returns an
+   `expansionParents` entry, propose refinements of that measured parent before selecting
+   more implementation work.
 3. For each selected node:
    - call `bftsApplyCandidate`;
    - send implementation work to that returned worktree path only;
    - run targeted checks while iterating;
    - call `bftsRunBenchmark` for the common final benchmark, using repeated runs when the
-     issue involves performance or flaky behavior;
+     issue involves performance or flaky behavior; this commits first and binds the
+     measurement to that exact commit;
    - record measured results and tradeoffs with `bftsRecordResult`, scoring every shared
      criterion from 0-10 with concrete evidence; a successful node is committed on its
      isolated branch so child refinements inherit its implementation.
-4. Expand promising nodes by calling `bftsProposeCandidates` with `parentNodeId` when a
-   refinement or a combined approach is justified. Children start from the parent branch.
+4. Expand only the measured node returned in `expansionParents` by calling
+   `bftsProposeCandidates` with its `parentNodeId`. Children start from the parent branch.
 5. A failed node may return to `pending` for a bounded debug attempt. Abandon it when the
    run's maximum debug attempts are exceeded.
 6. Continue autonomously until the step budget is exhausted, no pending node remains, or

@@ -49,6 +49,10 @@ function statePath(root, runId) {
   return join(runDirectory(root, runId), 'state.json');
 }
 
+function lockPath(root, runId) {
+  return join(runDirectory(root, runId), 'state.lock');
+}
+
 function reportDirectory(root, runId) {
   return join(root, 'report', safeId(runId));
 }
@@ -59,12 +63,19 @@ function loadState(root, runId) {
     throw new Error(`Run not found: ${runId}`);
   }
   const state = JSON.parse(readFileSync(path, 'utf8'));
+  const stateVersion = state.stateVersion || 1;
   state.evaluationCriteria ||= [];
   state.baselineBenchmark ||= null;
+  state.nextExpansionParentId ||= null;
   state.searchHistory ||= [];
   for (const node of state.nodes || []) {
     node.overallPlan ||= node.description;
     node.evaluation ||= null;
+    node.expanded ||= false;
+    if (stateVersion < 2 && node.evaluation) {
+      if (Number.isFinite(node.evaluation.score)) node.evaluation.score /= 10;
+      if (Number.isFinite(node.score)) node.score /= 10;
+    }
     if (node.benchmark && node.benchmark.runs === undefined) {
       const execution = {
         run: 1,
@@ -84,6 +95,7 @@ function loadState(root, runId) {
       node.benchmark.executions = [execution];
     }
   }
+  state.stateVersion = 2;
   return state;
 }
 
@@ -94,6 +106,83 @@ function saveState(root, state) {
   const temporaryPath = `${path}.${process.pid}.tmp`;
   writeFileSync(temporaryPath, `${JSON.stringify(state, null, 2)}\n`);
   renameSync(temporaryPath, path);
+}
+
+async function withStateLock(root, runId, callback) {
+  const directory = runDirectory(root, runId);
+  mkdirSync(directory, { recursive: true });
+  const path = lockPath(root, runId);
+  const holder = spawn(
+    'flock',
+    ['-x', '-w', '10', path, 'sh', '-c', "printf 'locked\\n'; cat >/dev/null"],
+    { stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  let stderr = '';
+  holder.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  await new Promise((resolveLock, rejectLock) => {
+    let output = '';
+    holder.stdout.on('data', (chunk) => {
+      output += chunk;
+      if (output.includes('locked\n')) resolveLock();
+    });
+    holder.once('error', rejectLock);
+    holder.once('exit', (code) => {
+      if (!output.includes('locked\n')) {
+        rejectLock(new Error(stderr.trim() || `Timed out waiting for run state lock: ${runId} (${code})`));
+      }
+    });
+  });
+  try {
+    return await callback();
+  } finally {
+    holder.stdin.end();
+    await new Promise((resolveExit) => holder.once('exit', resolveExit));
+  }
+}
+
+function commitCandidate(node) {
+  const changes = git(node.worktreePath, ['status', '--porcelain']);
+  if (changes) {
+    git(node.worktreePath, ['add', '-A']);
+    execFileSync(
+      'git',
+      [
+        '-C', node.worktreePath,
+        '-c', 'user.name=AI Scientist',
+        '-c', 'user.email=ai-scientist@localhost',
+        'commit', '-m', `AI Scientist candidate: ${node.title}`,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+  }
+  const remainingChanges = git(node.worktreePath, ['status', '--porcelain']);
+  if (remainingChanges) {
+    throw new Error(`Candidate worktree is not clean after commit: ${node.nodeId}`);
+  }
+  return git(node.worktreePath, ['rev-parse', 'HEAD']);
+}
+
+function hasTrustedBenchmark(node) {
+  return Boolean(
+    node.benchmark?.success
+    && node.benchmark.integrityValid
+    && node.benchmark.commitSha,
+  );
+}
+
+function bestExpandableNode(state) {
+  const parentIds = new Set(state.nodes.map((node) => node.parentId).filter(Boolean));
+  return state.nodes
+    .filter((node) => (
+      node.status === 'done'
+      && hasTrustedBenchmark(node)
+      && node.evaluation
+      && !node.expanded
+      && !parentIds.has(node.nodeId)
+    ))
+    .sort((a, b) => b.score - a.score || a.nodeId.localeCompare(b.nodeId))[0] || null;
 }
 
 function detectBenchmarkCommand(root) {
@@ -312,6 +401,7 @@ export async function planRun(input) {
   const benchmarkCommand = input.benchmarkCommand || scan.benchmarkCommand;
   const checks = readinessChecks(scan, input.issue, benchmarkCommand, runId);
   const state = {
+    stateVersion: 2,
     runId,
     issue: input.issue.trim(),
     projectPath: scan.projectPath,
@@ -329,6 +419,7 @@ export async function planRun(input) {
       numDrafts: input.numDrafts,
     },
     stepsUsed: 0,
+    nextExpansionParentId: null,
     nodes: [],
     searchHistory: [],
   };
@@ -340,185 +431,235 @@ export async function planRun(input) {
 
 export async function setEvaluationCriteria({ projectPath, runId, criteria }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  if (state.nodes.some((node) => node.evaluation)) {
-    throw new Error('Evaluation criteria cannot change after a candidate is evaluated.');
-  }
-  const names = criteria.map((criterion) => criterion.name.trim().toLowerCase());
-  if (new Set(names).size !== names.length) {
-    throw new Error('Evaluation criterion names must be unique.');
-  }
-  state.evaluationCriteria = criteria.map((criterion) => ({
-    name: criterion.name.trim(),
-    description: criterion.description.trim(),
-    weight: criterion.weight,
-  }));
-  appendHistory(state, 'evaluation-criteria-set', {
-    criteria: state.evaluationCriteria.map((criterion) => criterion.name),
+  return withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    if (state.nodes.some((node) => node.evaluation)) {
+      throw new Error('Evaluation criteria cannot change after a candidate is evaluated.');
+    }
+    const names = criteria.map((criterion) => criterion.name.trim().toLowerCase());
+    if (new Set(names).size !== names.length) {
+      throw new Error('Evaluation criterion names must be unique.');
+    }
+    state.evaluationCriteria = criteria.map((criterion) => ({
+      name: criterion.name.trim(),
+      description: criterion.description.trim(),
+      weight: criterion.weight,
+    }));
+    appendHistory(state, 'evaluation-criteria-set', {
+      criteria: state.evaluationCriteria.map((criterion) => criterion.name),
+    });
+    saveState(root, state);
+    writePlan(root, state);
+    return { runId, evaluationCriteria: state.evaluationCriteria };
   });
-  saveState(root, state);
-  writePlan(root, state);
-  return { runId, evaluationCriteria: state.evaluationCriteria };
 }
 
 export async function recheckRun({ projectPath, runId, benchmarkCommand }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  const scan = await scanProject({ projectPath: root, focus: state.issue });
-  const nextBenchmarkCommand = benchmarkCommand || state.benchmarkCommand || scan.benchmarkCommand;
-  const benchmarkChanged = nextBenchmarkCommand !== state.benchmarkCommand;
-  const baseChanged = scan.baseCommit !== state.baseCommit;
-  if (baseChanged && state.nodes.length > 0) {
-    throw new Error('Repository HEAD changed after search began; create a new run to preserve a consistent baseline.');
-  }
-  if (benchmarkChanged && state.nodes.some((node) => node.benchmark)) {
-    throw new Error('Benchmark command changed after candidate measurements began; create a new run for comparable evidence.');
-  }
-  state.benchmarkCommand = nextBenchmarkCommand;
-  const checks = readinessChecks(scan, state.issue, nextBenchmarkCommand, runId);
-  state.readiness = { ready: checks.every((check) => check.ready), checks };
-  state.status = state.readiness.ready ? 'planned' : 'blocked';
-  if (state.readiness.ready && baseChanged) {
-    state.baseCommit = scan.baseCommit;
-  }
-  if (benchmarkChanged || baseChanged) {
-    state.baselineBenchmark = null;
-    appendHistory(state, 'baseline-invalidated', {
-      benchmarkChanged,
-      baseChanged,
-    });
-  }
-  saveState(root, state);
-  writePlan(root, state);
-  return state;
+  const initialState = loadState(root, runId);
+  const scan = await scanProject({ projectPath: root, focus: initialState.issue });
+  return withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    const nextBenchmarkCommand = benchmarkCommand || state.benchmarkCommand || scan.benchmarkCommand;
+    const benchmarkChanged = nextBenchmarkCommand !== state.benchmarkCommand;
+    const baseChanged = scan.baseCommit !== state.baseCommit;
+    if (baseChanged && state.nodes.length > 0) {
+      throw new Error('Repository HEAD changed after search began; create a new run to preserve a consistent baseline.');
+    }
+    if (benchmarkChanged && state.nodes.length > 0) {
+      throw new Error('Benchmark command changed after candidates were proposed; create a new run for comparable evidence.');
+    }
+    state.benchmarkCommand = nextBenchmarkCommand;
+    const checks = readinessChecks(scan, state.issue, nextBenchmarkCommand, runId);
+    state.readiness = { ready: checks.every((check) => check.ready), checks };
+    state.status = state.readiness.ready ? 'planned' : 'blocked';
+    if (state.readiness.ready && baseChanged) {
+      state.baseCommit = scan.baseCommit;
+    }
+    if (benchmarkChanged || baseChanged) {
+      state.baselineBenchmark = null;
+      appendHistory(state, 'baseline-invalidated', {
+        benchmarkChanged,
+        baseChanged,
+      });
+    }
+    saveState(root, state);
+    writePlan(root, state);
+    return state;
+  });
 }
 
 export async function proposeCandidates({ projectPath, runId, parentNodeId, candidates }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  if (!state.readiness.ready) {
-    throw new Error('Run is blocked by readiness checks; resolve them before proposing candidates.');
-  }
-  if (!state.baselineBenchmark) {
-    throw new Error('Run the baseline benchmark before proposing candidates.');
-  }
-  if (state.evaluationCriteria.length < 2) {
-    throw new Error('Define at least two shared evaluation criteria before proposing candidates.');
-  }
-  if (state.nodes.length > 0 && !parentNodeId) {
-    throw new Error('Root candidates have already been registered for this run.');
-  }
-  const parent = parentNodeId
-    ? state.nodes.find((node) => node.nodeId === parentNodeId)
-    : null;
-  if (parentNodeId && !parent) {
-    throw new Error(`Parent node not found: ${parentNodeId}`);
-  }
-  if (parent && (parent.status !== 'done' || !parent.branchRef)) {
-    throw new Error(`Parent node must be completed and committed before expansion: ${parentNodeId}`);
-  }
-  const offset = state.nodes.length;
-  const added = candidates.map((candidate, index) => ({
-    nodeId: `${String(offset + index + 1).padStart(2, '0')}-${safeId(candidate.title) || 'candidate'}`,
-    parentId: parentNodeId || null,
-    title: candidate.title,
-    description: candidate.description,
-    rationale: candidate.rationale || '',
-    overallPlan: parent
-      ? `${parent.overallPlan}\nRefinement: ${candidate.description}`
-      : candidate.description,
-    status: 'pending',
-    score: candidate.initialScore ?? 0,
-    debugAttempts: 0,
-    branchRef: null,
-    worktreePath: null,
-    benchmark: null,
-    evaluation: null,
-    notes: '',
-  }));
-  state.nodes.push(...added);
-  state.status = 'searching';
-  appendHistory(state, 'candidates-proposed', {
-    parentNodeId: parentNodeId || null,
-    nodeIds: added.map((node) => node.nodeId),
+  return withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    if (!state.readiness.ready) {
+      throw new Error('Run is blocked by readiness checks; resolve them before proposing candidates.');
+    }
+    if (!state.baselineBenchmark) {
+      throw new Error('Run the baseline benchmark before proposing candidates.');
+    }
+    if (state.evaluationCriteria.length < 2) {
+      throw new Error('Define at least two shared evaluation criteria before proposing candidates.');
+    }
+    if (state.nodes.length > 0 && !parentNodeId) {
+      throw new Error('Root candidates have already been registered for this run.');
+    }
+    if (!parentNodeId && candidates.length !== state.config.numDrafts) {
+      throw new Error(`Root proposal requires exactly ${state.config.numDrafts} candidates.`);
+    }
+    const parent = parentNodeId
+      ? state.nodes.find((node) => node.nodeId === parentNodeId)
+      : null;
+    if (parentNodeId && !parent) {
+      throw new Error(`Parent node not found: ${parentNodeId}`);
+    }
+    if (parent && (parent.status !== 'done' || !parent.branchRef)) {
+      throw new Error(`Parent node must be completed and committed before expansion: ${parentNodeId}`);
+    }
+    if (parent && state.nextExpansionParentId !== parentNodeId) {
+      throw new Error(`Expand the best measured node selected by bftsSelectNextNode: ${state.nextExpansionParentId || 'none'}`);
+    }
+    const offset = state.nodes.length;
+    const added = candidates.map((candidate, index) => ({
+      nodeId: `${String(offset + index + 1).padStart(2, '0')}-${safeId(candidate.title) || 'candidate'}`,
+      parentId: parentNodeId || null,
+      title: candidate.title,
+      description: candidate.description,
+      rationale: candidate.rationale || '',
+      overallPlan: parent
+        ? `${parent.overallPlan}\nRefinement: ${candidate.description}`
+        : candidate.description,
+      status: 'pending',
+      score: null,
+      debugAttempts: 0,
+      expanded: false,
+      branchRef: null,
+      worktreePath: null,
+      benchmark: null,
+      evaluation: null,
+      notes: '',
+    }));
+    if (parent) {
+      parent.expanded = true;
+      state.nextExpansionParentId = null;
+    }
+    state.nodes.push(...added);
+    state.status = 'searching';
+    appendHistory(state, 'candidates-proposed', {
+      parentNodeId: parentNodeId || null,
+      nodeIds: added.map((node) => node.nodeId),
+    });
+    saveState(root, state);
+    return { runId, nodes: added };
   });
-  saveState(root, state);
-  return { runId, nodes: added };
 }
 
 export async function selectNextNodes({ projectPath, runId, numWorkers }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  const remaining = state.config.maxSteps - state.stepsUsed;
-  if (remaining <= 0) {
+  return withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    const remaining = state.config.maxSteps - state.stepsUsed;
+    if (remaining <= 0) {
+      state.status = 'exhausted';
+      saveState(root, state);
+      return { runId, nodes: [], expansionParents: [], reason: 'maxSteps exhausted' };
+    }
+    const running = state.nodes.filter((node) => ['running', 'benchmarking'].includes(node.status)).length;
+    const requestedWorkers = Math.min(numWorkers || state.config.numWorkers, state.config.numWorkers);
+    const capacity = Math.max(0, requestedWorkers - running);
+    if (capacity === 0) {
+      return { runId, nodes: [], expansionParents: [], reason: 'all worker slots are busy' };
+    }
+    const count = Math.min(capacity, remaining);
+    const selected = state.nodes
+      .filter((node) => node.status === 'pending')
+      .sort((a, b) => a.nodeId.localeCompare(b.nodeId))
+      .slice(0, count);
+    for (const node of selected) {
+      node.status = 'running';
+    }
+    state.stepsUsed += selected.length;
+    if (selected.length > 0) {
+      appendHistory(state, 'nodes-selected', {
+        nodeIds: selected.map((node) => node.nodeId),
+        stepsUsed: state.stepsUsed,
+      });
+      saveState(root, state);
+      return {
+        runId,
+        nodes: selected,
+        expansionParents: [],
+        stepsUsed: state.stepsUsed,
+        maxSteps: state.config.maxSteps,
+      };
+    }
+    if (running > 0) {
+      return { runId, nodes: [], expansionParents: [], reason: 'waiting for running nodes' };
+    }
+    const parent = bestExpandableNode(state);
+    if (parent) {
+      state.nextExpansionParentId = parent.nodeId;
+      appendHistory(state, 'expansion-parent-selected', {
+        nodeId: parent.nodeId,
+        score: parent.score,
+      });
+      saveState(root, state);
+      return {
+        runId,
+        nodes: [],
+        expansionParents: [parent],
+        reason: 'propose refinements for the highest-scoring measured leaf',
+        stepsUsed: state.stepsUsed,
+        maxSteps: state.config.maxSteps,
+      };
+    }
     state.status = 'exhausted';
     saveState(root, state);
-    return { runId, nodes: [], reason: 'maxSteps exhausted' };
-  }
-  const running = state.nodes.filter((node) => node.status === 'running').length;
-  const requestedWorkers = Math.min(numWorkers || state.config.numWorkers, state.config.numWorkers);
-  const capacity = Math.max(0, requestedWorkers - running);
-  if (capacity === 0) {
-    return { runId, nodes: [], reason: 'all worker slots are busy' };
-  }
-  const count = Math.min(capacity, remaining);
-  const selected = state.nodes
-    .filter((node) => node.status === 'pending')
-    .sort((a, b) => b.score - a.score || a.nodeId.localeCompare(b.nodeId))
-    .slice(0, count);
-  for (const node of selected) {
-    node.status = 'running';
-  }
-  state.stepsUsed += selected.length;
-  if (selected.length === 0 && running === 0) state.status = 'exhausted';
-  if (selected.length > 0) {
-    appendHistory(state, 'nodes-selected', {
-      nodeIds: selected.map((node) => node.nodeId),
-      stepsUsed: state.stepsUsed,
-    });
-  }
-  saveState(root, state);
-  return { runId, nodes: selected, stepsUsed: state.stepsUsed, maxSteps: state.config.maxSteps };
+    return { runId, nodes: [], expansionParents: [], reason: 'no pending or expandable nodes' };
+  });
 }
 
 export async function applyCandidate({ projectPath, runId, nodeId }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  const node = state.nodes.find((candidate) => candidate.nodeId === nodeId);
-  if (!node) throw new Error(`Node not found: ${nodeId}`);
-  if (node.status !== 'running') throw new Error(`Node must be running before applying: ${nodeId}`);
-  if (!state.readiness.ready) throw new Error('Run readiness checks are not satisfied.');
+  return withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    const node = state.nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) throw new Error(`Node not found: ${nodeId}`);
+    if (node.status !== 'running') throw new Error(`Node must be running before applying: ${nodeId}`);
+    if (!state.readiness.ready) throw new Error('Run readiness checks are not satisfied.');
 
-  const parent = node.parentId
-    ? state.nodes.find((candidate) => candidate.nodeId === node.parentId)
-    : null;
-  if (parent && (parent.status !== 'done' || !parent.branchRef)) {
-    throw new Error(`Parent node is not ready for refinement: ${node.parentId}`);
-  }
-  const startPoint = parent?.branchRef || state.baseCommit;
-  const branchRef = `ai-scientist/${safeId(runId)}/${safeId(nodeId)}`;
-  const worktreePath = join(root, WORKTREE_DIR, safeId(runId), safeId(nodeId));
-  assertSafeWorktreePath(root, worktreePath);
-  mkdirSync(join(root, WORKTREE_DIR, safeId(runId)), { recursive: true });
-  if (existsSync(worktreePath)) {
-    validateWorktree(worktreePath, branchRef);
-  } else {
-    const branchExists = git(root, ['branch', '--list', branchRef]).length > 0;
-    const created = spawnSync(
-      'git',
-      branchExists
-        ? ['-C', root, 'worktree', 'add', worktreePath, branchRef]
-        : ['-C', root, 'worktree', 'add', '-b', branchRef, worktreePath, startPoint],
-      { encoding: 'utf8' },
-    );
-    if (created.status !== 0) {
-      throw new Error(created.stderr.trim() || 'Failed to create candidate worktree.');
+    const parent = node.parentId
+      ? state.nodes.find((candidate) => candidate.nodeId === node.parentId)
+      : null;
+    if (parent && (parent.status !== 'done' || !parent.branchRef || !hasTrustedBenchmark(parent))) {
+      throw new Error(`Parent node is not ready for refinement: ${node.parentId}`);
     }
-  }
-  node.branchRef = branchRef;
-  node.worktreePath = worktreePath;
-  saveState(root, state);
-  return { runId, nodeId, branchRef, worktreePath };
+    const startPoint = parent?.benchmark.commitSha || state.baseCommit;
+    const branchRef = `ai-scientist/${safeId(runId)}/${safeId(nodeId)}`;
+    const worktreePath = join(root, WORKTREE_DIR, safeId(runId), safeId(nodeId));
+    assertSafeWorktreePath(root, worktreePath);
+    mkdirSync(join(root, WORKTREE_DIR, safeId(runId)), { recursive: true });
+    if (existsSync(worktreePath)) {
+      validateWorktree(worktreePath, branchRef);
+    } else {
+      const branchExists = git(root, ['branch', '--list', branchRef]).length > 0;
+      const created = spawnSync(
+        'git',
+        branchExists
+          ? ['-C', root, 'worktree', 'add', worktreePath, branchRef]
+          : ['-C', root, 'worktree', 'add', '-b', branchRef, worktreePath, startPoint],
+        { encoding: 'utf8' },
+      );
+      if (created.status !== 0) {
+        throw new Error(created.stderr.trim() || 'Failed to create candidate worktree.');
+      }
+    }
+    node.branchRef = branchRef;
+    node.worktreePath = worktreePath;
+    saveState(root, state);
+    return { runId, nodeId, branchRef, worktreePath };
+  });
 }
 
 async function executeBenchmark(command, cwd, timeoutSeconds, runs) {
@@ -606,58 +747,111 @@ async function executeBenchmark(command, cwd, timeoutSeconds, runs) {
 
 export async function runBaseline({ projectPath, runId, timeoutSeconds = 900, runs = 1 }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  if (!state.benchmarkCommand) throw new Error('No benchmark command configured.');
+  const initialState = loadState(root, runId);
+  if (!initialState.benchmarkCommand) throw new Error('No benchmark command configured.');
   const worktreePath = join(
     root,
     WORKTREE_DIR,
     safeId(runId),
-    `baseline-${state.baseCommit.slice(0, 12)}-${randomUUID().slice(0, 8)}`,
+    `baseline-${initialState.baseCommit.slice(0, 12)}-${randomUUID().slice(0, 8)}`,
   );
   assertSafeWorktreePath(root, worktreePath);
   mkdirSync(join(root, WORKTREE_DIR, safeId(runId)), { recursive: true });
   const created = spawnSync(
     'git',
-    ['-C', root, 'worktree', 'add', '--detach', worktreePath, state.baseCommit],
+    ['-C', root, 'worktree', 'add', '--detach', worktreePath, initialState.baseCommit],
     { encoding: 'utf8' },
   );
   if (created.status !== 0) {
     throw new Error(created.stderr.trim() || 'Failed to create baseline worktree.');
   }
-  state.baselineBenchmark = await executeBenchmark(
-    state.benchmarkCommand,
+  const benchmark = await executeBenchmark(
+    initialState.benchmarkCommand,
     worktreePath,
     timeoutSeconds,
     runs,
   );
-  state.baselineBenchmark.worktreePath = worktreePath;
-  appendHistory(state, 'baseline-benchmarked', {
-    success: state.baselineBenchmark.success,
-    passedRuns: state.baselineBenchmark.passedRuns,
-    runs: state.baselineBenchmark.runs,
+  benchmark.worktreePath = worktreePath;
+  benchmark.commitSha = initialState.baseCommit;
+  benchmark.integrityValid = (
+    git(worktreePath, ['rev-parse', 'HEAD']) === initialState.baseCommit
+    && git(worktreePath, ['status', '--porcelain']).length === 0
+  );
+  if (!benchmark.integrityValid) {
+    benchmark.success = false;
+    benchmark.integrityError = 'Baseline worktree changed while the benchmark was executing.';
+  }
+  await withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    if (
+      state.baseCommit !== initialState.baseCommit
+      || state.benchmarkCommand !== initialState.benchmarkCommand
+    ) {
+      throw new Error('Run configuration changed while the baseline benchmark was executing.');
+    }
+    state.baselineBenchmark = benchmark;
+    appendHistory(state, 'baseline-benchmarked', {
+      success: benchmark.success,
+      integrityValid: benchmark.integrityValid,
+      passedRuns: benchmark.passedRuns,
+      runs: benchmark.runs,
+    });
+    saveState(root, state);
   });
-  saveState(root, state);
-  return { runId, benchmark: state.baselineBenchmark };
+  return { runId, benchmark };
 }
 
 export async function runBenchmark({
   projectPath,
   runId,
   nodeId,
-  command,
   timeoutSeconds = 900,
   runs = 1,
 }) {
   const root = projectRoot(projectPath);
-  const initialState = loadState(root, runId);
-  const node = initialState.nodes.find((candidate) => candidate.nodeId === nodeId);
-  if (!node?.worktreePath) throw new Error(`Candidate worktree is not initialized: ${nodeId}`);
-  const benchmarkCommand = command || initialState.benchmarkCommand;
-  if (!benchmarkCommand) throw new Error('No benchmark command configured.');
+  const prepared = await withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    const node = state.nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!node?.worktreePath) throw new Error(`Candidate worktree is not initialized: ${nodeId}`);
+    const legacyRebenchmark = node.status === 'done' && !node.benchmark?.commitSha;
+    if (node.status !== 'running' && !legacyRebenchmark) {
+      throw new Error(`Node must be running before benchmarking: ${nodeId}`);
+    }
+    if (!state.benchmarkCommand) throw new Error('No benchmark command configured.');
+    if (
+      !state.baselineBenchmark
+      || state.baselineBenchmark.command !== state.benchmarkCommand
+      || !state.baselineBenchmark.integrityValid
+    ) {
+      throw new Error('Run the current shared benchmark against the baseline before benchmarking candidates.');
+    }
+    if (legacyRebenchmark) {
+      node.evaluation = null;
+      node.score = null;
+      node.expanded = false;
+    }
+    const commitSha = commitCandidate(node);
+    const benchmarkInvocationId = randomUUID();
+    node.status = 'benchmarking';
+    node.benchmarkInvocationId = benchmarkInvocationId;
+    node.benchmark = null;
+    appendHistory(state, 'candidate-benchmark-started', {
+      nodeId,
+      commitSha,
+      command: state.benchmarkCommand,
+    });
+    saveState(root, state);
+    return {
+      benchmarkCommand: state.benchmarkCommand,
+      benchmarkInvocationId,
+      commitSha,
+      worktreePath: node.worktreePath,
+    };
+  });
 
   const benchmark = await executeBenchmark(
-    benchmarkCommand,
-    node.worktreePath,
+    prepared.benchmarkCommand,
+    prepared.worktreePath,
     timeoutSeconds,
     runs,
   );
@@ -669,19 +863,41 @@ export async function runBenchmark({
     stdout: lastExecution.stdout,
     stderr: lastExecution.stderr,
     timedOut: benchmark.executions.some((execution) => execution.timedOut),
+    commitSha: prepared.commitSha,
   });
-  const state = loadState(root, runId);
-  const currentNode = state.nodes.find((candidate) => candidate.nodeId === nodeId);
-  currentNode.benchmark = benchmark;
-  if (!benchmark.success) currentNode.score = -100;
-  appendHistory(state, 'candidate-benchmarked', {
-    nodeId,
-    success: benchmark.success,
-    passedRuns: benchmark.passedRuns,
-    runs: benchmark.runs,
+  const currentHead = git(prepared.worktreePath, ['rev-parse', 'HEAD']);
+  const worktreeChanges = git(prepared.worktreePath, ['status', '--porcelain']);
+  benchmark.integrityValid = currentHead === prepared.commitSha && worktreeChanges.length === 0;
+  if (!benchmark.integrityValid) {
+    benchmark.success = false;
+    benchmark.integrityError = 'Candidate worktree changed while the benchmark was executing.';
+  }
+  const score = await withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    const currentNode = state.nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!currentNode) throw new Error(`Node not found after benchmark: ${nodeId}`);
+    if (
+      currentNode.status !== 'benchmarking'
+      || currentNode.benchmarkInvocationId !== prepared.benchmarkInvocationId
+    ) {
+      throw new Error(`Benchmark invocation is no longer current for node: ${nodeId}`);
+    }
+    currentNode.benchmark = benchmark;
+    currentNode.status = 'running';
+    delete currentNode.benchmarkInvocationId;
+    if (!benchmark.success) currentNode.score = -100;
+    appendHistory(state, 'candidate-benchmarked', {
+      nodeId,
+      commitSha: prepared.commitSha,
+      integrityValid: benchmark.integrityValid,
+      success: benchmark.success,
+      passedRuns: benchmark.passedRuns,
+      runs: benchmark.runs,
+    });
+    saveState(root, state);
+    return currentNode.score;
   });
-  saveState(root, state);
-  return { runId, nodeId, score: currentNode.score, benchmark };
+  return { runId, nodeId, score, benchmark };
 }
 
 export async function recordResult({
@@ -695,99 +911,97 @@ export async function recordResult({
   evaluation,
 }) {
   const root = projectRoot(projectPath);
-  const state = loadState(root, runId);
-  const node = state.nodes.find((candidate) => candidate.nodeId === nodeId);
-  if (!node) throw new Error(`Node not found: ${nodeId}`);
-  if (status === 'done') {
-    const legacyReevaluation = node.status === 'done' && !node.evaluation && node.benchmark?.success;
-    if (
-      !legacyReevaluation
-      && (node.status !== 'running' || !node.worktreePath || !node.benchmark?.success)
-    ) {
-      throw new Error('A node can be completed only after its applied worktree passes the benchmark.');
-    }
-    if (!notes?.trim()) {
-      throw new Error('A completed node requires evidence-based notes.');
-    }
-    const expected = state.evaluationCriteria;
-    const supplied = evaluation || [];
-    const byName = new Map(supplied.map((item) => [item.name.trim().toLowerCase(), item]));
-    if (byName.size !== expected.length || supplied.length !== expected.length) {
-      throw new Error('A completed node requires one evaluation for every shared criterion.');
-    }
-    const criteria = expected.map((criterion) => {
-      const result = byName.get(criterion.name.toLowerCase());
-      if (!result?.evidence?.trim()) {
-        throw new Error(`Evaluation criterion requires evidence: ${criterion.name}`);
+  return withStateLock(root, runId, () => {
+    const state = loadState(root, runId);
+    const node = state.nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) throw new Error(`Node not found: ${nodeId}`);
+    const abandonUntrustedLegacy = (
+      status === 'abandoned'
+      && node.status === 'done'
+      && !hasTrustedBenchmark(node)
+    );
+    if (status === 'done') {
+      if (
+        node.status !== 'running'
+        || !node.worktreePath
+        || !node.benchmark?.success
+      ) {
+        throw new Error('A node can be completed only after its applied worktree passes the benchmark.');
       }
-      return {
-        name: criterion.name,
-        score: result.score,
-        weight: criterion.weight,
-        evidence: result.evidence.trim(),
+      if (
+        !node.benchmark.integrityValid
+        || git(node.worktreePath, ['rev-parse', 'HEAD']) !== node.benchmark.commitSha
+        || git(node.worktreePath, ['status', '--porcelain'])
+      ) {
+        throw new Error('Candidate worktree no longer matches the successfully benchmarked commit.');
+      }
+      if (!notes?.trim()) {
+        throw new Error('A completed node requires evidence-based notes.');
+      }
+      const expected = state.evaluationCriteria;
+      const supplied = evaluation || [];
+      const byName = new Map(supplied.map((item) => [item.name.trim().toLowerCase(), item]));
+      if (byName.size !== expected.length || supplied.length !== expected.length) {
+        throw new Error('A completed node requires one evaluation for every shared criterion.');
+      }
+      const criteria = expected.map((criterion) => {
+        const result = byName.get(criterion.name.toLowerCase());
+        if (!result?.evidence?.trim()) {
+          throw new Error(`Evaluation criterion requires evidence: ${criterion.name}`);
+        }
+        return {
+          name: criterion.name,
+          score: result.score,
+          weight: criterion.weight,
+          evidence: result.evidence.trim(),
+        };
+      });
+      const totalWeight = criteria.reduce((total, criterion) => total + criterion.weight, 0);
+      node.evaluation = {
+        criteria,
+        score: criteria.reduce(
+          (total, criterion) => total + criterion.score * criterion.weight,
+          0,
+        ) / totalWeight,
       };
+      node.score = node.evaluation.score;
+    } else if (status === 'pending') {
+      if (node.status !== 'running' || !debugAttempted) {
+        throw new Error('Only a running node with a recorded debug attempt can return to pending.');
+      }
+    } else if (!['pending', 'running'].includes(node.status) && !abandonUntrustedLegacy) {
+      throw new Error(`Cannot abandon node from status ${node.status}.`);
+    }
+    if (debugAttempted) {
+      node.debugAttempts += 1;
+      if (node.debugAttempts > state.config.maxDebugAttempts) {
+        node.status = 'abandoned';
+        node.notes = `${notes || ''}\nAbandoned after exceeding maxDebugAttempts.`.trim();
+        saveState(root, state);
+        return { runId, node };
+      }
+    }
+    node.status = status;
+    if (status !== 'done' && score !== undefined) node.score = score;
+    if (notes !== undefined) node.notes = notes;
+    if (
+      state.stepsUsed >= state.config.maxSteps
+      && state.nodes.every((candidate) => candidate.status !== 'running')
+    ) {
+      state.status = 'exhausted';
+    } else {
+      state.status = 'searching';
+    }
+    appendHistory(state, 'result-recorded', {
+      nodeId,
+      status: node.status,
+      score: node.score,
+      benchmarkSuccess: node.benchmark?.success ?? null,
+      debugAttempts: node.debugAttempts,
     });
-    const totalWeight = criteria.reduce((total, criterion) => total + criterion.weight, 0);
-    node.evaluation = {
-      criteria,
-      score: criteria.reduce(
-        (total, criterion) => total + criterion.score * criterion.weight,
-        0,
-      ) / totalWeight * 10,
-    };
-    node.score = node.evaluation.score;
-  } else if (status === 'pending') {
-    if (node.status !== 'running' || !debugAttempted) {
-      throw new Error('Only a running node with a recorded debug attempt can return to pending.');
-    }
-  } else if (!['pending', 'running'].includes(node.status)) {
-    throw new Error(`Cannot abandon node from status ${node.status}.`);
-  }
-  if (status === 'done' && node.status === 'running' && node.worktreePath) {
-    const changes = git(node.worktreePath, ['status', '--porcelain']);
-    if (changes) {
-      git(node.worktreePath, ['add', '-A']);
-      execFileSync(
-        'git',
-        [
-          '-C', node.worktreePath,
-          '-c', 'user.name=AI Scientist',
-          '-c', 'user.email=ai-scientist@localhost',
-          'commit', '-m', `AI Scientist candidate: ${node.title}`,
-        ],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-    }
-  }
-  if (debugAttempted) {
-    node.debugAttempts += 1;
-    if (node.debugAttempts > state.config.maxDebugAttempts) {
-      node.status = 'abandoned';
-      node.notes = `${notes || ''}\nAbandoned after exceeding maxDebugAttempts.`.trim();
-      saveState(root, state);
-      return { runId, node };
-    }
-  }
-  node.status = status;
-  if (status !== 'done' && score !== undefined) node.score = score;
-  if (notes !== undefined) node.notes = notes;
-  if (state.nodes.every((candidate) => ['done', 'abandoned'].includes(candidate.status))) {
-    state.status = 'complete';
-  } else if (
-    state.stepsUsed >= state.config.maxSteps
-    && state.nodes.every((candidate) => candidate.status !== 'running')
-  ) {
-    state.status = 'exhausted';
-  }
-  appendHistory(state, 'result-recorded', {
-    nodeId,
-    status: node.status,
-    score: node.score,
-    benchmarkSuccess: node.benchmark?.success ?? null,
-    debugAttempts: node.debugAttempts,
+    saveState(root, state);
+    return { runId, node };
   });
-  saveState(root, state);
-  return { runId, node };
 }
 
 export async function getRun({ projectPath, runId }) {
@@ -796,15 +1010,25 @@ export async function getRun({ projectPath, runId }) {
 
 export async function writeReport({ projectPath, runId, recommendation, conclusion }) {
   const root = projectRoot(projectPath);
+  return withStateLock(root, runId, () => writeReportLocked({
+    root,
+    runId,
+    recommendation,
+    conclusion,
+  }));
+}
+
+function writeReportLocked({ root, runId, recommendation, conclusion }) {
   const state = loadState(root, runId);
-  const running = state.nodes.filter((node) => node.status === 'running');
+  const running = state.nodes.filter((node) => ['running', 'benchmarking'].includes(node.status));
   const pending = state.nodes.filter((node) => node.status === 'pending');
   const budgetRemaining = state.stepsUsed < state.config.maxSteps;
+  const expandable = budgetRemaining ? bestExpandableNode(state) : null;
   const measured = state.nodes.filter((node) => node.benchmark);
   if (state.nodes.length === 0 || measured.length === 0) {
     throw new Error('Run has no measured candidate evidence to report.');
   }
-  if (running.length > 0 || (pending.length > 0 && budgetRemaining)) {
+  if (running.length > 0 || (pending.length > 0 && budgetRemaining) || expandable) {
     throw new Error('Run still has active or selectable nodes; finish or exhaust the search before writing the report.');
   }
   const directory = reportDirectory(root, runId);
@@ -818,16 +1042,35 @@ export async function writeReport({ projectPath, runId, recommendation, conclusi
         .map((criterion) => `${criterion.name}: ${criterion.score.toFixed(1)}/10`)
         .join('; ')
       : 'not evaluated';
-    return `| ${node.title} | ${node.status} | ${measured} | ${node.score.toFixed(2)} | ${evaluation} | ${node.notes || '—'} |`;
+    const score = Number.isFinite(node.score) ? node.score.toFixed(2) : 'not evaluated';
+    return `| ${node.title} | ${node.status} | ${measured} | ${score} | ${evaluation} | ${node.notes || '—'} |`;
   }).join('\n');
   const completed = state.nodes.filter((node) => node.benchmark);
-  const unevaluatedPassing = completed.filter((node) => node.benchmark.success && !node.evaluation);
+  const untrustedPassing = completed.filter((node) => (
+    node.status === 'done'
+    && node.benchmark.success
+    && !hasTrustedBenchmark(node)
+  ));
+  if (untrustedPassing.length > 0) {
+    throw new Error(
+      `Passing candidates require commit-bound re-benchmarking: ${untrustedPassing.map((node) => node.nodeId).join(', ')}`,
+    );
+  }
+  const unevaluatedPassing = completed.filter((node) => (
+    node.status === 'done'
+    && hasTrustedBenchmark(node)
+    && !node.evaluation
+  ));
   if (unevaluatedPassing.length > 0) {
     throw new Error(
       `Passing candidates require rubric evaluation before reporting: ${unevaluatedPassing.map((node) => node.nodeId).join(', ')}`,
     );
   }
-  const passing = completed.filter((node) => node.benchmark.success && node.evaluation);
+  const passing = completed.filter((node) => (
+    node.status === 'done'
+    && hasTrustedBenchmark(node)
+    && node.evaluation
+  ));
   const best = passing.sort((a, b) => b.score - a.score)[0];
   const tiedBest = best
     ? passing.filter((node) => Math.abs(node.score - best.score) < 0.01)
@@ -860,6 +1103,7 @@ export async function writeReport({ projectPath, runId, recommendation, conclusi
     + `## Search Configuration\n\n`
     + `- Workers: ${state.config.numWorkers}\n`
     + `- Steps used: ${state.stepsUsed}/${state.config.maxSteps}\n`
+    + `- Root drafts: ${state.config.numDrafts}\n`
     + `- Max debug attempts: ${state.config.maxDebugAttempts}\n`
     + `- Benchmark: ${state.benchmarkCommand ? `\`${state.benchmarkCommand}\`` : 'not configured'}\n\n`
     + `- Baseline: ${baseline}\n\n`

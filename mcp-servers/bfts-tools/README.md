@@ -11,10 +11,13 @@ process automatically per `.mcp.json` — no manual server management needed.
 - `bftsScanProject` — identify a concrete, scoped problem in a target project.
 - `bftsRunBaseline` — benchmark the untouched base commit in an isolated worktree.
 - `bftsSetEvaluationCriteria` — define the shared weighted rubric for all candidates.
-- `bftsProposeCandidates` — register candidate solution approaches as BFTS root nodes.
-- `bftsSelectNextNode` — best-first selection of the next node(s) to explore.
+- `bftsProposeCandidates` — register the configured root drafts or refinements of the
+  measured parent selected by BFTS.
+- `bftsSelectNextNode` — reserve pending implementations, then select the highest-scoring
+  completed leaf as the next expansion parent.
 - `bftsApplyCandidate` — apply a candidate on an isolated git branch/worktree.
-- `bftsRunBenchmark` — run the common command one or more times against a candidate.
+- `bftsRunBenchmark` — commit a candidate and run the common command one or more times
+  against that exact commit.
 - `bftsRecordResult` — record criterion scores, evidence, and final node status.
 - `bftsGetRun` — retrieve persistent plan, node, and benchmark state.
 - `bftsWriteReport` — persist the final measured tradeoff report.
@@ -28,6 +31,8 @@ Naming mirrors the original AI-Scientist-v2 `bfts_config.yaml` fields (`num_work
   checked-out branch.
 - Search is bounded by `numWorkers`/max steps/max debug attempts per node — no unbounded
   loops.
+- Cross-process locking serializes run-state updates from parallel workers.
+- Root draft count is enforced and measured rubric scores drive subsequent expansion.
 - Benchmarks are CPU-only (no GPU/VM assumptions).
 - No network access unless explicitly requested by a tool call.
 - Never fabricate results — anything not actually executed must be labeled as such by

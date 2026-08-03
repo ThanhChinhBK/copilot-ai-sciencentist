@@ -17,7 +17,7 @@ import {
   writeReport,
 } from './src/core.js';
 
-const server = new McpServer({ name: 'bfts-tools', version: '0.3.1' });
+const server = new McpServer({ name: 'bfts-tools', version: '0.4.0' });
 
 function result(value) {
   return {
@@ -104,7 +104,7 @@ register(
 
 register(
   'bftsProposeCandidates',
-  'Register candidate solution approaches as BFTS root nodes.',
+  'Register the configured number of root drafts or refinements for the measured parent selected by BFTS.',
   {
     runId: z.string(),
     projectPath: z.string(),
@@ -113,7 +113,6 @@ register(
       title: z.string().min(1),
       description: z.string().min(1),
       rationale: z.string().optional(),
-      initialScore: z.number().optional(),
     })).min(2).max(6),
   },
   proposeCandidates,
@@ -121,7 +120,7 @@ register(
 
 register(
   'bftsSelectNextNode',
-  'Select and reserve the highest-scored pending BFTS nodes within the run budget.',
+  'Reserve pending implementations or select the highest-scoring measured leaf for expansion.',
   {
     runId: z.string(),
     projectPath: z.string(),
@@ -143,12 +142,11 @@ register(
 
 register(
   'bftsRunBenchmark',
-  'Run the configured or supplied benchmark command in a candidate worktree and persist measured output.',
+  'Commit a candidate and run the shared benchmark against that exact immutable commit.',
   {
     runId: z.string(),
     projectPath: z.string(),
     nodeId: z.string(),
-    command: z.string().optional(),
     timeoutSeconds: z.number().int().min(1).max(3600).default(900),
     runs: z.number().int().min(1).max(5).default(1),
   },
