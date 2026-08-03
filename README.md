@@ -25,16 +25,15 @@ This is a scoped re-implementation of the BFTS search idea from
 
 ## Install
 
-From the root of the Git repository you want to investigate:
+Install once for your user account:
 
 ```bash
-npx --yes --package=github:ThanhChinhBK/copilot-ai-sciencentist#v0.3.1 copilot-ai-scientist init
+npx --yes --package=github:ThanhChinhBK/copilot-ai-sciencentist#v0.4.1 copilot-ai-scientist init
 ```
 
-The installer adds the agent and prompt files under `.github/`, installs its isolated MCP
-runtime, and merges `bfts-tools` into `.mcp.json` without replacing other MCP servers.
-Commit the installed files so everyone working in the repository gets the same setup.
-On a fresh clone, the MCP launcher restores its dependencies automatically on first use.
+The default installation uses Copilot CLI's user-level locations under `~/.copilot`
+(`agents/`, `mcp-config.json`, and `copilot-ai-scientist/`). It does not add or modify
+files in repositories you investigate. `COPILOT_HOME` is respected when configured.
 
 When the package is available from npm, the equivalent command is:
 
@@ -42,27 +41,29 @@ When the package is available from npm, the equivalent command is:
 npx copilot-ai-scientist init
 ```
 
-The installer refuses to overwrite customized AI Scientist files. Pass `--force` only
-when intentionally upgrading or replacing them.
+For a team-shared repository installation with committed agent, prompt, and MCP files,
+run `copilot-ai-scientist init --repo`. The installer refuses to overwrite customized
+files; pass `--force` only when intentionally replacing them.
 
 ## First flow
 
-Start Copilot CLI in the installed repository:
+Start Copilot CLI in the repository to investigate:
 
 ```text
 /agent ai-scientist
-/ai-scientist-plan <describe the current issue>
+Investigate <describe the current issue> using the full AI Scientist workflow.
 ```
 
 Review `report/<run-id>/plan.md`. If readiness passes, enable Copilot CLI autopilot for
-the long execution and resume with:
+the long execution:
 
 ```text
 /autopilot
-/ai-scientist-run <run-id>
+Continue the AI Scientist run <run-id>.
 ```
 
-Use `/ai-scientist-solve <issue>` to plan and proceed in one session. The long run
+Repository installations also provide `/ai-scientist-plan`, `/ai-scientist-run`, and
+`/ai-scientist-solve` prompt commands. The long run
 continues through research, bounded BFTS exploration, common benchmarks, and
 `report/<run-id>/report.md`.
 
